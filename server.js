@@ -1,7 +1,7 @@
 const express = require('express');
 const app = express();
 
-// Aapke accounts ke servers ki list (Aap yahan aur bhi add kar sakte hain)
+// Aapke accounts ke servers ki list
 const servers = [
     "https://quickprint-dqxs.onrender.com",
     "https://qr-print-vb07.onrender.com"
@@ -17,7 +17,10 @@ app.get('/', (req, res) => {
 // Jab koi QR code scan karke aayega: /u/7869834444
 app.get('/u/:id', async (req, res) => {
     const userId = req.params.id;
+    console.log(`\n--- New Request Received for User ID: ${userId} ---`);
+    
     let targetServer = servers[activeServerIndex];
+    console.log(`Checking current preferred server: ${targetServer}`);
 
     try {
         const controller = new AbortController();
@@ -30,21 +33,26 @@ app.get('/u/:id', async (req, res) => {
         clearTimeout(timeoutId);
 
         if (check.ok) {
+            console.log(`[SUCCESS] Server is active. Redirecting to: ${targetServer}/u/${userId}`);
             return res.redirect(302, `${targetServer}/u/${userId}`);
+        } else {
+            console.log(`[WARNING] Server responded with status: ${check.status}`);
         }
     } catch (error) {
-        console.log(`Server down hai: ${targetServer}`);
+        console.log(`[ERROR] Server down ya unreachable hai: ${targetServer} -> Error: ${error.message}`);
     }
 
     // Agar pehla server fail ho gaya, toh agle server par switch ho jao
+    console.log(`Switching to backup server...`);
     activeServerIndex = (activeServerIndex + 1) % servers.length;
     targetServer = servers[activeServerIndex];
-
+    
+    console.log(`[FAILOVER] Redirecting to backup server: ${targetServer}/u/${userId}`);
     // Naye active server par redirect kar do
     return res.redirect(302, `${targetServer}/u/${userId}`);
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Master Router running on port ${PORT}`);
+    console.log(`Master Router running and listening on port ${PORT}`);
 });
