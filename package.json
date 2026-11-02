@@ -1,0 +1,12 @@
+{
+  "name": "master-router",
+  -version": "1.0.0",
+  "description": "Smart Master Redirector for Quick Print",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
