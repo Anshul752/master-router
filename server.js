@@ -1,9 +1,9 @@
 const express = require('express');
 const app = express();
 
-// Aapke 4-5 accounts ke servers ki list
+// Aapke accounts ke servers ki list (Aap yahan aur bhi add kar sakte hain)
 const servers = [
-    "https://quickprint-dqxs.onrender.com/",
+    "https://quickprint-dqxs.onrender.com",
     "https://qr-print-vb07.onrender.com"
 ];
 
@@ -23,6 +23,7 @@ app.get('/u/:id', async (req, res) => {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 3000);
 
+        // Check karenge ki server zinda hai ya nahi (/ping route se)
         const check = await fetch(`${targetServer}/ping`, { 
             signal: controller.signal 
         });
@@ -35,10 +36,11 @@ app.get('/u/:id', async (req, res) => {
         console.log(`Server down hai: ${targetServer}`);
     }
 
-    // Agar pehla fail hua, toh agle server par switch ho jao
+    // Agar pehla server fail ho gaya, toh agle server par switch ho jao
     activeServerIndex = (activeServerIndex + 1) % servers.length;
     targetServer = servers[activeServerIndex];
 
+    // Naye active server par redirect kar do
     return res.redirect(302, `${targetServer}/u/${userId}`);
 });
 
