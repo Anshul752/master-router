@@ -1,6 +1,6 @@
 {
   "name": "master-router",
-  -version": "1.0.0",
+  "version": "1.0.0",
   "description": "Smart Master Redirector for Quick Print",
   "main": "server.js",
   "scripts": {
