@@ -1,16 +1,38 @@
 const express = require('express');
 const app = express();
 
-// Aapke accounts ke servers ki list
+// Aapke saare accounts ki list (kisi ko bhi pehle rakh sakte hain)
 const servers = [
     "https://quickprint-dqxs.onrender.com",
     "https://qr-print-vb07.onrender.com"
 ];
 
-let activeServerIndex = 0;
+// Helper function jo sare servers ko check karke pehla active server dhoondhega
+async function getBestActiveServer() {
+    for (let server of servers) {
+        try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 2500); // 2.5 sec timeout
+
+            const check = await fetch(`${server}/ping`, { 
+                signal: controller.signal 
+            });
+            clearTimeout(timeoutId);
+
+            if (check.ok) {
+                // Yeh server active aur working hai!
+                return server;
+            }
+        } catch (error) {
+            // Yeh server band hai ya bandwidth khatam hai, agle ko check karo
+        }
+    }
+    // Agar koi active na mile, toh default me pehla wala return kar do
+    return servers[0];
+}
 
 app.get('/', (req, res) => {
-    res.send("Master Router (Stable Proxy) is active!");
+    res.send("Master Router (Smart Auto-Select) is active!");
 });
 
 app.get('/ping', (req, res) => {
@@ -21,29 +43,10 @@ app.use('/', async (req, res) => {
     if (req.path === '/' || req.path === '/ping') return;
 
     const originalPath = req.originalUrl;
-    let targetServer = servers[activeServerIndex];
-
-    let isServerActive = false;
-
-    try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 3000);
-
-        const check = await fetch(`${targetServer}/ping`, { 
-            signal: controller.signal 
-        });
-        clearTimeout(timeoutId);
-
-        if (check.ok) isServerActive = true;
-    } catch (error) {
-        // Server down
-    }
-
-    if (!isServerActive) {
-        activeServerIndex = (activeServerIndex + 1) % servers.length;
-        targetServer = servers[activeServerIndex];
-        console.log(`[FAILOVER] Switched to: ${targetServer}`);
-    }
+    
+    // 🎯 AUTOMATICALLY BEST WORKING SERVER SELECT KAREGA
+    let targetServer = await getBestActiveServer();
+    console.log(`[SMART ROUTER] Selected active server: ${targetServer}`);
 
     const targetUrl = `${targetServer}${originalPath}`;
 
@@ -66,7 +69,6 @@ app.use('/', async (req, res) => {
 
         const backendResponse = await fetch(targetUrl, options);
 
-        // Agar Render ka sleep page ya HTML error aa raha hai toh JSON format me do
         const contentType = backendResponse.headers.get('content-type') || '';
         if (!backendResponse.ok && contentType.includes('text/html')) {
             return res.status(502).json({ 
@@ -93,5 +95,5 @@ app.use('/', async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Stable Master Proxy running on port ${PORT}`);
+    console.log(`Smart Auto-Select Master Proxy running on port ${PORT}`);
 });
