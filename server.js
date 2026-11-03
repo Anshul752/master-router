@@ -9,23 +9,18 @@ const servers = [
 
 let activeServerIndex = 0;
 
-// Test karne ke liye root route
 app.get('/', (req, res) => {
-    res.send("Master Router (Full Proxy) is active!");
+    res.send("Master Router (Stable Proxy) is active!");
 });
 
 app.get('/ping', (req, res) => {
     res.status(200).send("OK");
 });
 
-// HAR TARIKH KI REQUEST (/u/... aur /api/...) KO BACKEND PAR PROXY KAREGA
 app.use('/', async (req, res) => {
-    // Agar master router ka khud ka root ya ping hai toh use yahin handle karo
-    if (req.path === '/' || req.path === '/ping') {
-        return;
-    }
+    if (req.path === '/' || req.path === '/ping') return;
 
-    const originalPath = req.originalUrl; // e.g. /u/7869834444 ya /api/jobs/xyz
+    const originalPath = req.originalUrl;
     let targetServer = servers[activeServerIndex];
 
     let isServerActive = false;
@@ -39,68 +34,64 @@ app.use('/', async (req, res) => {
         });
         clearTimeout(timeoutId);
 
-        if (check.ok) {
-            isServerActive = true;
-        }
+        if (check.ok) isServerActive = true;
     } catch (error) {
         // Server down
     }
 
-    // Agar pehla server fail ho gaya, toh backup par switch ho jao
     if (!isServerActive) {
         activeServerIndex = (activeServerIndex + 1) % servers.length;
         targetServer = servers[activeServerIndex];
-        console.log(`[FAILOVER] Switched to backup server: ${targetServer}`);
+        console.log(`[FAILOVER] Switched to: ${targetServer}`);
     }
 
     const targetUrl = `${targetServer}${originalPath}`;
 
     try {
-        // Request ke liye headers aur body prepare karo (POST aur file uploads ke liye zaroori hai)
         const headers = new Headers();
         for (const [key, value] of Object.entries(req.headers)) {
             if (key !== 'host') headers.set(key, value);
         }
         headers.set('host', new URL(targetServer).host);
 
-        let body = undefined;
+        let options = {
+            method: req.method,
+            headers: headers
+        };
+
         if (!['GET', 'HEAD'].includes(req.method)) {
-            // Agar POST request hai (jaise file upload ya status update), toh body stream pass karo
-            body = req; 
+            options.body = req;
+            options.duplex = 'half';
         }
 
-        const backendResponse = await fetch(targetUrl, {
-            method: req.method,
-            headers: headers,
-            body: body,
-            duplex: 'half' // Node.js me streaming body ke liye zaroori hai
-        });
+        const backendResponse = await fetch(targetUrl, options);
 
-        // Backend ke headers user ko bhejo
+        // Agar Render ka sleep page ya HTML error aa raha hai toh JSON format me do
+        const contentType = backendResponse.headers.get('content-type') || '';
+        if (!backendResponse.ok && contentType.includes('text/html')) {
+            return res.status(502).json({ 
+                error: "Backend server is waking up from sleep. Please retry in 10 seconds." 
+            });
+        }
+
         backendResponse.headers.forEach((val, key) => {
             res.setHeader(key, val);
         });
 
         res.status(backendResponse.status);
 
-        // Response ko stream karo (Polling JSON responses aur file downloads ke liye)
-        const reader = backendResponse.body.getReader();
-        while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            res.write(value);
-        }
-        res.end();
+        const buffer = await backendResponse.arrayBuffer();
+        return res.send(Buffer.from(buffer));
 
     } catch (err) {
-        console.error(`Proxy Error for ${originalPath}: ${err.message}`);
+        console.error(`Proxy Error: ${err.message}`);
         if (!res.headersSent) {
-            res.status(500).send("Proxy Error: Unable to reach backend print server.");
+            return res.status(502).json({ error: "Master Proxy: Unable to reach backend server." });
         }
     }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Master Full Proxy running on port ${PORT}`);
+    console.log(`Stable Master Proxy running on port ${PORT}`);
 });
