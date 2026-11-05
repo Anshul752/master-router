@@ -1,6 +1,9 @@
 const express = require('express');
 const app = express();
 
+// Login / Forms ke data ko theek se bhejne ke liye
+app.use(express.raw({ type: '*/*', limit: '10mb' }));
+
 const servers = [
     "https://qr-print-1.onrender.com",
     "https://qr-print-2.onrender.com",
@@ -8,48 +11,61 @@ const servers = [
     "https://qr-print-4.onrender.com"
 ];
 
-// Memory me active server save rahega (0ms Delay ke liye)
-let currentActiveServer = servers[0];
+// Memory me sirf wahi 1 active server rahega
+let activeServer = servers[0];
 
-// Background health check function
-async function checkAndUpdateBestServer() {
-    for (let server of servers) {
-        try {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 2000); // 2 sec fast timeout
+// Single server checker (Fast Timeout: 2.5s)
+async function checkServer(url) {
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 2500);
 
-            const check = await fetch(`${server}/ping`, { signal: controller.signal });
-            clearTimeout(timeoutId);
+        const res = await fetch(`${url}/ping`, { signal: controller.signal });
+        clearTimeout(timeoutId);
 
-            if (check.ok) {
-                if (currentActiveServer !== server) {
-                    console.log(`[HEALTH CHECK] Switched active server to: ${server}`);
-                    currentActiveServer = server;
-                }
-                return;
-            }
-        } catch (error) {
-            // Yeh server sleep/down hai, agle ko check karo
+        // Render suspend hone par 200 OK nahi deta
+        if (res.ok && res.status === 200) {
+            return url;
         }
+    } catch (e) {
+        // Suspend ya dead server
+    }
+    return null;
+}
+
+// CHARON SERVERS KO EK SAATH (PARALLEL) SCAN KARNE WALA FUNCTION
+async function findAndLockActiveServer() {
+    try {
+        // Ek saath sabhi servers ko ping karo (Promise.all)
+        const results = await Promise.all(servers.map(checkServer));
+        const found = results.find(url => url !== null);
+
+        if (found) {
+            if (activeServer !== found) {
+                console.log(`[SMART ROUTER] 🎯 Found Active Server: ${found}`);
+                activeServer = found;
+            }
+        } else {
+            console.warn("[WARNING] Koi bhi server 200 OK nahi de raha (All sleeping/suspended).");
+        }
+    } catch (err) {
+        console.error("Scanner Error:", err.message);
     }
 }
 
-// Har 10 second me background me check karega (User ko wait nahi karna padega)
-setInterval(checkAndUpdateBestServer, 10000);
-checkAndUpdateBestServer(); // Start hote hi ek baar run karega
+// Start hote hi scanner chalao aur har 25 second me background me check karo
+findAndLockActiveServer();
+setInterval(findAndLockActiveServer, 25000);
 
-// Render Health Check
-app.get('/ping', (req, res) => {
-    res.status(200).send("OK");
-});
+// Router ka apna Ping (Render health check)
+app.get('/ping', (req, res) => res.status(200).send("OK"));
 
-// INSTANT PROXY (ZERO DELAY)
+// DIRECT FAST PROXY (Bina kisi delay ke)
 app.use(async (req, res) => {
     if (req.path === '/ping') return;
 
     const originalPath = req.originalUrl;
-    const targetServer = currentActiveServer; // Turant cached active server use hoga
-    const targetUrl = `${targetServer}${originalPath}`;
+    const targetUrl = `${activeServer}${originalPath}`;
 
     try {
         const headers = new Headers();
@@ -58,27 +74,26 @@ app.use(async (req, res) => {
                 headers.set(key, value);
             }
         }
-        headers.set('host', new URL(targetServer).host);
+        headers.set('host', new URL(activeServer).host);
 
         let options = {
             method: req.method,
             headers: headers
         };
 
-        if (!['GET', 'HEAD'].includes(req.method)) {
-            options.body = req;
-            options.duplex = 'half';
+        if (!['GET', 'HEAD'].includes(req.method) && req.body && req.body.length > 0) {
+            options.body = req.body;
         }
 
         const backendResponse = await fetch(targetUrl, options);
 
-        // Agar Render ka sleeping error ho to turant agla check trigger karo
+        // Agar chal raha server abhi-abhi suspend ho gaya ho
         if (backendResponse.status === 502 || backendResponse.status === 503) {
             const testText = await backendResponse.clone().text();
-            if (testText.includes("Render") || testText.includes("spinning up")) {
-                checkAndUpdateBestServer(); // Background me naya server dhoondo
+            if (testText.includes("Render") || testText.includes("spinning up") || testText.includes("suspended")) {
+                findAndLockActiveServer(); // Turant naya active server dhoondho
                 return res.status(502).json({ 
-                    error: "Backend server is waking up. Please refresh in 5 seconds." 
+                    error: "Server switch ho raha hai ya wake up ho raha hai. Please 5 second baad refresh karein." 
                 });
             }
         }
@@ -91,21 +106,26 @@ app.use(async (req, res) => {
             }
         });
 
-        res.status(backendResponse.status);
+        // Login Cookies ko set karein
+        const setCookie = backendResponse.headers.getSetCookie ? backendResponse.headers.getSetCookie() : null;
+        if (setCookie && setCookie.length > 0) {
+            res.setHeader('set-cookie', setCookie);
+        }
 
+        res.status(backendResponse.status);
         const buffer = await backendResponse.arrayBuffer();
         return res.send(Buffer.from(buffer));
 
     } catch (err) {
-        console.error(`Proxy Error on ${targetServer}: ${err.message}`);
-        checkAndUpdateBestServer(); // Error aate hi naya server dhundo
+        console.error(`Error reaching ${activeServer}: ${err.message}`);
+        findAndLockActiveServer(); // Error aate hi scanner chalao
         if (!res.headersSent) {
-            return res.status(502).json({ error: "Master Proxy: Backend unreachable, retrying..." });
+            return res.status(502).json({ error: "Master Proxy: Unable to reach backend server." });
         }
     }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Ultra-Fast Master Proxy running on port ${PORT}`);
+    console.log(`Parallel Smart Router running on port ${PORT}`);
 });
