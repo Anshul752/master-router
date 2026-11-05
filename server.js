@@ -1,7 +1,7 @@
 const express = require('express');
 const app = express();
 
-// Aapke saare accounts ki list (kisi ko bhi pehle rakh sakte hain)
+// Aapke saare backend accounts ki list
 const servers = [
     "https://qr-print-1.onrender.com",
     "https://qr-print-2.onrender.com",
@@ -9,7 +9,7 @@ const servers = [
     "https://qr-print-4.onrender.com"
 ];
 
-// Helper function jo sare servers ko check karke pehla active server dhoondhega
+// Helper function jo sabhi servers ko check karega
 async function getBestActiveServer() {
     for (let server of servers) {
         try {
@@ -22,33 +22,31 @@ async function getBestActiveServer() {
             clearTimeout(timeoutId);
 
             if (check.ok) {
-                // Yeh server active aur working hai!
-                return server;
+                return server; // Working server mil gaya
             }
         } catch (error) {
-            // Yeh server band hai ya bandwidth khatam hai, agle ko check karo
+            // Server down/sleep hai, agle ko check karo
         }
     }
-    // Agar koi active na mile, toh default me pehla wala return kar do
+    // Agar koi active na mile to pehle wale par default bhej do
     return servers[0];
 }
 
-app.get('/', (req, res) => {
-    res.send("Master Router (Smart Auto-Select) is active!");
-});
-
+// Render Health Check ke liye sirf /ping rakhein
 app.get('/ping', (req, res) => {
     res.status(200).send("OK");
 });
 
-app.use('/', async (req, res) => {
-    if (req.path === '/' || req.path === '/ping') return;
+// BAAKI SAARI REQUESTS (including Homepage '/') BACKEND PAR FORWARD HONGI
+app.use(async (req, res) => {
+    // Agar /ping request hai toh skip karo
+    if (req.path === '/ping') return;
 
     const originalPath = req.originalUrl;
     
-    // 🎯 AUTOMATICALLY BEST WORKING SERVER SELECT KAREGA
+    // 🎯 BEST WORKING SERVER SELECT KAREGA
     let targetServer = await getBestActiveServer();
-    console.log(`[SMART ROUTER] Selected active server: ${targetServer}`);
+    console.log(`[SMART ROUTER] Forwarding to active server: ${targetServer}${originalPath}`);
 
     const targetUrl = `${targetServer}${originalPath}`;
 
@@ -74,7 +72,7 @@ app.use('/', async (req, res) => {
         const contentType = backendResponse.headers.get('content-type') || '';
         if (!backendResponse.ok && contentType.includes('text/html')) {
             return res.status(502).json({ 
-                error: "Backend server is waking up from sleep. Please retry in 10 seconds." 
+                error: "Backend server is waking up from sleep. Please retry in 10-15 seconds." 
             });
         }
 
