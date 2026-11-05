@@ -5,8 +5,8 @@ const { URL } = require('url');
 const app = express();
 
 // =====================================================================
-// 👉 JAB BHI SERVER BADALNA HO, BAS YAHAN URL CHANGE KAR DENA:
-const BACKEND_URL = "https://qr-print-1.onrender.com";
+// 👉 Render Dashboard ke Environment se URL lega (Nahi milega toh default 1st server)
+const BACKEND_URL = process.env.BACKEND_URL;
 // =====================================================================
 
 // High-Speed Keep-Alive Agent (Python socket reset 10054 ko rokne ke liye)
