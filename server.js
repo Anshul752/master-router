@@ -1,7 +1,6 @@
 const express = require('express');
 const app = express();
 
-// Aapke saare backend accounts ki list
 const servers = [
     "https://qr-print-1.onrender.com",
     "https://qr-print-2.onrender.com",
@@ -9,44 +8,47 @@ const servers = [
     "https://qr-print-4.onrender.com"
 ];
 
-// Helper function jo sabhi servers ko check karke active server dhoondhega
-async function getBestActiveServer() {
+// Memory me active server save rahega (0ms Delay ke liye)
+let currentActiveServer = servers[0];
+
+// Background health check function
+async function checkAndUpdateBestServer() {
     for (let server of servers) {
         try {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 2500); // 2.5 sec timeout
+            const timeoutId = setTimeout(() => controller.abort(), 2000); // 2 sec fast timeout
 
-            const check = await fetch(`${server}/ping`, { 
-                signal: controller.signal 
-            });
+            const check = await fetch(`${server}/ping`, { signal: controller.signal });
             clearTimeout(timeoutId);
 
             if (check.ok) {
-                return server; // Active server mil gaya
+                if (currentActiveServer !== server) {
+                    console.log(`[HEALTH CHECK] Switched active server to: ${server}`);
+                    currentActiveServer = server;
+                }
+                return;
             }
         } catch (error) {
-            // Server down/sleep hai, agle ko check karo
+            // Yeh server sleep/down hai, agle ko check karo
         }
     }
-    // Agar koi active na mile to default me pehla server return karo
-    return servers[0];
 }
 
-// Render Health Check ke liye sirf /ping alag se handle hoga
+// Har 10 second me background me check karega (User ko wait nahi karna padega)
+setInterval(checkAndUpdateBestServer, 10000);
+checkAndUpdateBestServer(); // Start hote hi ek baar run karega
+
+// Render Health Check
 app.get('/ping', (req, res) => {
     res.status(200).send("OK");
 });
 
-// BAAKI SAARI REQUESTS (Homepage, Login, APIs) YAHAN SE FORWARD HONGI
+// INSTANT PROXY (ZERO DELAY)
 app.use(async (req, res) => {
     if (req.path === '/ping') return;
 
     const originalPath = req.originalUrl;
-    
-    // 🎯 Active server select karega
-    let targetServer = await getBestActiveServer();
-    console.log(`[SMART ROUTER] Forwarding to: ${targetServer}${originalPath}`);
-
+    const targetServer = currentActiveServer; // Turant cached active server use hoga
     const targetUrl = `${targetServer}${originalPath}`;
 
     try {
@@ -70,17 +72,18 @@ app.use(async (req, res) => {
 
         const backendResponse = await fetch(targetUrl, options);
 
-        // Sirf tabhi sleep error dikhana hai jab sach me Render ka 502/503 sleeping page ho
+        // Agar Render ka sleeping error ho to turant agla check trigger karo
         if (backendResponse.status === 502 || backendResponse.status === 503) {
             const testText = await backendResponse.clone().text();
             if (testText.includes("Render") || testText.includes("spinning up")) {
+                checkAndUpdateBestServer(); // Background me naya server dhoondo
                 return res.status(502).json({ 
-                    error: "Backend server is waking up from sleep. Please retry in 10-15 seconds." 
+                    error: "Backend server is waking up. Please refresh in 5 seconds." 
                 });
             }
         }
 
-        // Response headers copy karna (encoding/length ko chhod kar taaki page corrupt na ho)
+        // Headers pass karein
         backendResponse.headers.forEach((val, key) => {
             const lowerKey = key.toLowerCase();
             if (lowerKey !== 'content-encoding' && lowerKey !== 'content-length' && lowerKey !== 'transfer-encoding') {
@@ -94,14 +97,15 @@ app.use(async (req, res) => {
         return res.send(Buffer.from(buffer));
 
     } catch (err) {
-        console.error(`Proxy Error: ${err.message}`);
+        console.error(`Proxy Error on ${targetServer}: ${err.message}`);
+        checkAndUpdateBestServer(); // Error aate hi naya server dhundo
         if (!res.headersSent) {
-            return res.status(502).json({ error: "Master Proxy: Unable to reach backend server." });
+            return res.status(502).json({ error: "Master Proxy: Backend unreachable, retrying..." });
         }
     }
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Smart Auto-Select Master Proxy running on port ${PORT}`);
+    console.log(`Ultra-Fast Master Proxy running on port ${PORT}`);
 });
