@@ -1,8 +1,9 @@
 const express = require('express');
-const app = express();
+const https = require('https');
+const http = require('http');
+const { URL } = require('url');
 
-// Login / Forms ke data ko theek se bhejne ke liye
-app.use(express.raw({ type: '*/*', limit: '10mb' }));
+const app = express();
 
 const servers = [
     "https://qr-print-1.onrender.com",
@@ -11,121 +12,116 @@ const servers = [
     "https://qr-print-4.onrender.com"
 ];
 
-// Memory me sirf wahi 1 active server rahega
 let activeServer = servers[0];
+let isScanning = false;
 
-// Single server checker (Fast Timeout: 2.5s)
-async function checkServer(url) {
-    try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 2500);
+// High-Performance Keep-Alive Agent (ConnectionReset 10054 ko rokne ke liye)
+const httpsAgent = new https.Agent({
+    keepAlive: true,
+    keepAliveMsecs: 30000,
+    maxSockets: 100,
+    timeout: 6000
+});
 
-        const res = await fetch(`${url}/ping`, { signal: controller.signal });
-        clearTimeout(timeoutId);
-
-        // Render suspend hone par 200 OK nahi deta
-        if (res.ok && res.status === 200) {
-            return url;
-        }
-    } catch (e) {
-        // Suspend ya dead server
-    }
-    return null;
+// Single Server Checker
+function checkServer(serverUrl) {
+    return new Promise((resolve) => {
+        const u = new URL(serverUrl + '/ping');
+        const req = https.get(u, { agent: httpsAgent, timeout: 2000 }, (res) => {
+            if (res.statusCode === 200) {
+                resolve(serverUrl);
+            } else {
+                resolve(null);
+            }
+            res.resume(); // consume memory
+        });
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+    });
 }
 
-// CHARON SERVERS KO EK SAATH (PARALLEL) SCAN KARNE WALA FUNCTION
-async function findAndLockActiveServer() {
+// Parallel Scanner (Sirf tabhi chalega jab server fail ho ya start ho)
+async function findActiveServer() {
+    if (isScanning) return;
+    isScanning = true;
+    console.log("[ROUTER] Scanning for the active server...");
     try {
-        // Ek saath sabhi servers ko ping karo (Promise.all)
         const results = await Promise.all(servers.map(checkServer));
         const found = results.find(url => url !== null);
-
         if (found) {
-            if (activeServer !== found) {
-                console.log(`[SMART ROUTER] 🎯 Found Active Server: ${found}`);
-                activeServer = found;
-            }
+            console.log(`[ROUTER] 🎯 Active server set to: ${found}`);
+            activeServer = found;
         } else {
-            console.warn("[WARNING] Koi bhi server 200 OK nahi de raha (All sleeping/suspended).");
+            console.warn("[ROUTER] ⚠️ No active server responded with 200 OK!");
         }
-    } catch (err) {
-        console.error("Scanner Error:", err.message);
+    } finally {
+        isScanning = false;
     }
 }
 
-// Start hote hi scanner chalao aur har 25 second me background me check karo
-findAndLockActiveServer();
-setInterval(findAndLockActiveServer, 25000);
+// Start par scan karega
+findActiveServer();
 
-// Router ka apna Ping (Render health check)
+// Health check endpoint
 app.get('/ping', (req, res) => res.status(200).send("OK"));
 
-// DIRECT FAST PROXY (Bina kisi delay ke)
-app.use(async (req, res) => {
+// ULTRA-FAST STREAMING PROXY (Direct Socket Pipe)
+app.use((req, res) => {
     if (req.path === '/ping') return;
 
-    const originalPath = req.originalUrl;
-    const targetUrl = `${activeServer}${originalPath}`;
+    const targetUrl = new URL(activeServer + req.originalUrl);
 
-    try {
-        const headers = new Headers();
-        for (const [key, value] of Object.entries(req.headers)) {
-            if (key.toLowerCase() !== 'host') {
-                headers.set(key, value);
-            }
-        }
-        headers.set('host', new URL(activeServer).host);
+    // Headers set karein
+    const clientHeaders = { ...req.headers };
+    clientHeaders.host = targetUrl.host;
+    delete clientHeaders['connection']; // HTTP/1.1 keep-alive control
 
-        let options = {
-            method: req.method,
-            headers: headers
-        };
+    const options = {
+        protocol: targetUrl.protocol,
+        hostname: targetUrl.hostname,
+        port: targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80),
+        path: targetUrl.pathname + targetUrl.search,
+        method: req.method,
+        headers: clientHeaders,
+        agent: httpsAgent,
+        timeout: 6000 // 6 second timeout
+    };
 
-        if (!['GET', 'HEAD'].includes(req.method) && req.body && req.body.length > 0) {
-            options.body = req.body;
-        }
-
-        const backendResponse = await fetch(targetUrl, options);
-
-        // Agar chal raha server abhi-abhi suspend ho gaya ho
-        if (backendResponse.status === 502 || backendResponse.status === 503) {
-            const testText = await backendResponse.clone().text();
-            if (testText.includes("Render") || testText.includes("spinning up") || testText.includes("suspended")) {
-                findAndLockActiveServer(); // Turant naya active server dhoondho
-                return res.status(502).json({ 
-                    error: "Server switch ho raha hai ya wake up ho raha hai. Please 5 second baad refresh karein." 
-                });
-            }
+    const proxyReq = https.request(options, (backendRes) => {
+        // Agar chal raha server suspend ho gaya (502/503)
+        if (backendRes.statusCode === 502 || backendRes.statusCode === 503) {
+            findActiveServer(); // Naye active server ki khoj shuru karo
         }
 
-        // Headers pass karein
-        backendResponse.headers.forEach((val, key) => {
-            const lowerKey = key.toLowerCase();
-            if (lowerKey !== 'content-encoding' && lowerKey !== 'content-length' && lowerKey !== 'transfer-encoding') {
-                res.setHeader(key, val);
-            }
-        });
+        // Headers pass-through
+        res.writeHead(backendRes.statusCode, backendRes.headers);
 
-        // Login Cookies ko set karein
-        const setCookie = backendResponse.headers.getSetCookie ? backendResponse.headers.getSetCookie() : null;
-        if (setCookie && setCookie.length > 0) {
-            res.setHeader('set-cookie', setCookie);
-        }
+        // DIRECT PIPING (Zero Buffer, Zero Delay!)
+        backendRes.pipe(res);
+    });
 
-        res.status(backendResponse.status);
-        const buffer = await backendResponse.arrayBuffer();
-        return res.send(Buffer.from(buffer));
-
-    } catch (err) {
-        console.error(`Error reaching ${activeServer}: ${err.message}`);
-        findAndLockActiveServer(); // Error aate hi scanner chalao
+    proxyReq.on('timeout', () => {
+        proxyReq.destroy();
+        console.error(`[TIMEOUT] ${activeServer} did not respond in 6s. Triggering scan.`);
+        findActiveServer();
         if (!res.headersSent) {
-            return res.status(502).json({ error: "Master Proxy: Unable to reach backend server." });
+            res.status(504).json({ error: "Gateway Timeout: Backend is slow." });
         }
-    }
+    });
+
+    proxyReq.on('error', (err) => {
+        console.error(`[PROXY ERROR] ${err.message}. Finding active server...`);
+        findActiveServer();
+        if (!res.headersSent) {
+            res.status(502).json({ error: "Master Proxy: Backend unreachable." });
+        }
+    });
+
+    // Client ki request direct backend par stream karein (GET ho ya POST)
+    req.pipe(proxyReq);
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Parallel Smart Router running on port ${PORT}`);
+    console.log(`High-Speed Native Streaming Router running on port ${PORT}`);
 });
