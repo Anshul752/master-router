@@ -3,8 +3,10 @@ const app = express();
 
 // Aapke saare accounts ki list (kisi ko bhi pehle rakh sakte hain)
 const servers = [
-    "https://quickprint-dqxs.onrender.com",
-    "https://qr-print-vb07.onrender.com"
+    "https://qr-print-1.onrender.com",
+    "https://qr-print-2.onrender.com",
+    "https://qr-print-3.onrender.com",
+    "https://qr-print-4.onrender.com"
 ];
 
 // Helper function jo sare servers ko check karke pehla active server dhoondhega
