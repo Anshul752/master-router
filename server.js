@@ -9,7 +9,7 @@ const servers = [
     "https://qr-print-4.onrender.com"
 ];
 
-// Helper function jo sabhi servers ko check karega
+// Helper function jo sabhi servers ko check karke active server dhoondhega
 async function getBestActiveServer() {
     for (let server of servers) {
         try {
@@ -22,38 +22,39 @@ async function getBestActiveServer() {
             clearTimeout(timeoutId);
 
             if (check.ok) {
-                return server; // Working server mil gaya
+                return server; // Active server mil gaya
             }
         } catch (error) {
             // Server down/sleep hai, agle ko check karo
         }
     }
-    // Agar koi active na mile to pehle wale par default bhej do
+    // Agar koi active na mile to default me pehla server return karo
     return servers[0];
 }
 
-// Render Health Check ke liye sirf /ping rakhein
+// Render Health Check ke liye sirf /ping alag se handle hoga
 app.get('/ping', (req, res) => {
     res.status(200).send("OK");
 });
 
-// BAAKI SAARI REQUESTS (including Homepage '/') BACKEND PAR FORWARD HONGI
+// BAAKI SAARI REQUESTS (Homepage, Login, APIs) YAHAN SE FORWARD HONGI
 app.use(async (req, res) => {
-    // Agar /ping request hai toh skip karo
     if (req.path === '/ping') return;
 
     const originalPath = req.originalUrl;
     
-    // 🎯 BEST WORKING SERVER SELECT KAREGA
+    // 🎯 Active server select karega
     let targetServer = await getBestActiveServer();
-    console.log(`[SMART ROUTER] Forwarding to active server: ${targetServer}${originalPath}`);
+    console.log(`[SMART ROUTER] Forwarding to: ${targetServer}${originalPath}`);
 
     const targetUrl = `${targetServer}${originalPath}`;
 
     try {
         const headers = new Headers();
         for (const [key, value] of Object.entries(req.headers)) {
-            if (key !== 'host') headers.set(key, value);
+            if (key.toLowerCase() !== 'host') {
+                headers.set(key, value);
+            }
         }
         headers.set('host', new URL(targetServer).host);
 
@@ -69,15 +70,22 @@ app.use(async (req, res) => {
 
         const backendResponse = await fetch(targetUrl, options);
 
-        const contentType = backendResponse.headers.get('content-type') || '';
-        if (!backendResponse.ok && contentType.includes('text/html')) {
-            return res.status(502).json({ 
-                error: "Backend server is waking up from sleep. Please retry in 10-15 seconds." 
-            });
+        // Sirf tabhi sleep error dikhana hai jab sach me Render ka 502/503 sleeping page ho
+        if (backendResponse.status === 502 || backendResponse.status === 503) {
+            const testText = await backendResponse.clone().text();
+            if (testText.includes("Render") || testText.includes("spinning up")) {
+                return res.status(502).json({ 
+                    error: "Backend server is waking up from sleep. Please retry in 10-15 seconds." 
+                });
+            }
         }
 
+        // Response headers copy karna (encoding/length ko chhod kar taaki page corrupt na ho)
         backendResponse.headers.forEach((val, key) => {
-            res.setHeader(key, val);
+            const lowerKey = key.toLowerCase();
+            if (lowerKey !== 'content-encoding' && lowerKey !== 'content-length' && lowerKey !== 'transfer-encoding') {
+                res.setHeader(key, val);
+            }
         });
 
         res.status(backendResponse.status);
