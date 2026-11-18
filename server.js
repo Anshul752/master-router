@@ -1,19 +1,74 @@
 const express = require('express');
+const https = require('https');
+const http = require('http');
 const app = express();
 
-// Render Dashboard -> Environment mein set karein:
-// BACKEND_URL=https://sub1.onrender.com (ya https://print1.idprintstudio.shop)
-function getServers() {
-    const raw = process.env.BACKEND_URLS || process.env.BACKEND_URL || "";
-    return raw
-        .split(',')
-        .map(u => u.trim().replace(/\/+$/, ''))
-        .filter(Boolean);
+const ALL_SERVERS = (process.env.BACKEND_URLS || process.env.BACKEND_URL || "")
+    .split(',')
+    .map(u => u.trim().replace(/\/+$/, ''))
+    .filter(Boolean);
+
+let activeServer = ALL_SERVERS[0] || "";
+let serverHealthStatus = {};
+
+// Helper: Kisi bhi server ka /ping check karega (Timeout: 5 seconds)
+function pingServer(url) {
+    return new Promise((resolve) => {
+        try {
+            const parsed = new URL(url + "/ping");
+            const client = parsed.protocol === 'https:' ? https : http;
+            
+            const req = client.get(parsed.href, { timeout: 5000 }, (res) => {
+                resolve(res.statusCode === 200);
+            });
+            
+            req.on('timeout', () => { req.destroy(); resolve(false); });
+            req.on('error', () => resolve(false));
+        } catch (e) {
+            resolve(false);
+        }
+    });
 }
 
-let currentIndex = 0;
+// 🧠 AUTO-FAILOVER ENGINE (Har 60 sec mein check karega)
+async function checkAndFailover() {
+    if (ALL_SERVERS.length === 0) return;
 
-// 1. CORS Headers (Mobile Web, Python Agent, aur Third-Party ke liye safe)
+    // 1. Current active server ko check karo
+    const isCurrentAlive = await pingServer(activeServer);
+    serverHealthStatus[activeServer] = isCurrentAlive ? "ONLINE" : "OFFLINE";
+
+    if (isCurrentAlive) {
+        return; // Sab sahi chal raha hai, switch karne ki zaroorat nahi
+    }
+
+    console.log(`⚠️ Alert: Active server ${activeServer} is DOWN / SUSPENDED! Searching backup...`);
+
+    // 2. Agar active server down hai, toh list mein se pehla healthy server dhoondo
+    for (const server of ALL_SERVERS) {
+        const alive = await pingServer(server);
+        serverHealthStatus[server] = alive ? "ONLINE" : "OFFLINE";
+        
+        if (alive) {
+            console.log(`✅ [AUTO-SWITCH SUCCESS] New Active Server: ${server}`);
+            activeServer = server;
+            return;
+        }
+    }
+
+    console.error("🚨 CRITICAL: Saare sub-servers down ya suspend hain!");
+}
+
+// Background monitoring start (Har 60 seconds)
+setInterval(checkAndFailover, 60000);
+// Server start hote hi pehla check turant kare
+setTimeout(checkAndFailover, 3000);
+
+// =========================================================================
+// MIDDLEWARES & ROUTES
+// =========================================================================
+
+// CORS Headers
 app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -22,44 +77,38 @@ app.use((req, res, next) => {
     next();
 });
 
-// 2. Render / UptimeRobot Health Check (Master active rahega)
+// Health check for Master itself
 app.get('/ping', (req, res) => res.status(200).send("OK"));
 
-// 3. Lightweight API Endpoint (~300 bytes)
-app.get('/get-server', (req, res) => {
-    const servers = getServers();
-    if (servers.length === 0) {
-        return res.status(500).json({ error: "No sub-servers configured in Master Router" });
-    }
-
-    const selected = servers[currentIndex % servers.length];
-    currentIndex = (currentIndex + 1) % servers.length;
-
-    // Cache roko taaki URL change hote hi client turant update ho sake
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+// 📊 Live Status Page (Aap browser mein https://quickprint.idprintstudio.shop/status khol kar live dekh sakte hain)
+app.get('/status', (req, res) => {
     res.json({
-        server: selected,
-        cache_seconds: 300
+        active_server: activeServer,
+        all_servers: serverHealthStatus,
+        last_checked: new Date().toISOString()
     });
 });
 
-// 4. Instant 307 Redirect (Customer Mobile & Python Direct Hits)
-app.use((req, res) => {
-    const servers = getServers();
-    if (servers.length === 0) {
-        return res.status(500).json({ error: "No backend configured in Master Router" });
+// Discovery Endpoint (Python Desktop Agent ke liye)
+app.get('/get-server', (req, res) => {
+    if (!activeServer) {
+        return res.status(502).json({ error: "No healthy backend server available" });
     }
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.json({ server: activeServer, cache_seconds: 60 });
+});
 
-    // Active backend select karein
-    const selected = servers[currentIndex % servers.length];
-    currentIndex = (currentIndex + 1) % servers.length;
-
-    // Mobile browser ko redirect cache karne se rokein (Server switch smooth hoga)
+// ⚡ 307 Dynamic Redirection (Customer QR & Web Traffic)
+app.use((req, res) => {
+    if (!activeServer) {
+        return res.status(502).send("All Print Servers are currently offline. Please contact admin.");
+    }
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    
-    // Direct sub-account par bhejein (Zero data load on Master)
-    res.redirect(307, selected + req.originalUrl);
+    res.redirect(307, activeServer + req.originalUrl);
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Lightweight Zero-Bandwidth Master Router Active!"));
+app.listen(PORT, () => {
+    console.log(`Automated Master Router running on port ${PORT}`);
+    console.log(`Managed Servers: ${ALL_SERVERS.join(', ')}`);
+});
